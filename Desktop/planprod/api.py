@@ -11,8 +11,8 @@ import numpy as np
 # LOAD MODEL
 # ================================
 
-model = joblib.load("alert_model.joblib")
-label_encoder = joblib.load("label_encoder.joblib")
+model = joblib.load(os.path.join(os.getcwd(), "alert_model.joblib"))
+label_encoder = joblib.load(os.path.join(os.getcwd(), "label_encoder.joblib"))
 
 # ================================
 # INIT APP
