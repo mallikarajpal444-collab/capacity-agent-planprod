@@ -3,8 +3,9 @@
 # ================================
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Optional
 import joblib
 import numpy as np
 import os
@@ -13,8 +14,8 @@ import os
 # LOAD MODELS
 # ================================
 
-clf = joblib.load(os.path.join(os.getcwd(), "capacity_classifier.joblib"))
-reg = joblib.load(os.path.join(os.getcwd(), "delay_regressor.joblib"))
+clf           = joblib.load(os.path.join(os.getcwd(), "capacity_classifier.joblib"))
+reg           = joblib.load(os.path.join(os.getcwd(), "delay_regressor.joblib"))
 label_encoder = joblib.load(os.path.join(os.getcwd(), "label_encoder.joblib"))
 
 # ================================
@@ -23,17 +24,52 @@ label_encoder = joblib.load(os.path.join(os.getcwd(), "label_encoder.joblib"))
 
 app = FastAPI(title="Capacity & Schedule Control Tower API")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ================================
+# SCHEMAS
+# ================================
+
+class WorkCentre(BaseModel):
+    id: str
+    utilization_pct: float
+    efficiency: Optional[float] = 1.0
+    queue_length: Optional[int] = 0
+
+class InputData(BaseModel):
+    # From Demand Agent
+    forecast_qty: float
+    shortage_probability: float
+    demand_gap: Optional[float] = None          # optional — pass if demand agent sends it
+
+    # From Supabase (primary / current work centre being evaluated)
+    utilization_pct: float
+    throughput_deviation_pct: float
+    efficiency: float
+    supplier_otif: float
+    queue_length: int
+    due_in_hrs: float
+
+    # All available work centres from Supabase
+    work_centres: List[WorkCentre]
+
 # ================================
 # HELPER FUNCTIONS
 # ================================
 
-def compute_capacity_left(utilization):
-    return max(0, 100 - utilization)
+def compute_capacity_left(utilization: float) -> float:
+    return round(max(0.0, 100.0 - utilization), 2)
 
 
-def compute_schedule(predicted_delay, processing_time, queue_length, due_in_hrs):
+def compute_schedule(predicted_delay: float, processing_time: float,
+                     queue_length: int, due_in_hrs: float):
     total_time = processing_time * (queue_length + 1) + predicted_delay
-    delay = total_time - due_in_hrs
+    delay      = total_time - due_in_hrs
 
     if delay > 2:
         risk = "HIGH"
@@ -42,43 +78,18 @@ def compute_schedule(predicted_delay, processing_time, queue_length, due_in_hrs)
     else:
         risk = "LOW"
 
-    return total_time, delay, risk
+    return round(total_time, 2), round(max(0.0, delay), 2), risk
 
 
-def suggest_best_workcentre(work_centres):
+def suggest_best_workcentre(work_centres: List[WorkCentre]):
     if not work_centres:
         return None
-
-    best = min(work_centres, key=lambda wc: wc["utilization"])
-
+    best = min(work_centres, key=lambda wc: wc.utilization_pct)
     return {
-        "id": best["id"],
-        "utilization": best["utilization"],
-        "capacity_left": 100 - best["utilization"]
+        "id":             best.id,
+        "utilization_pct": best.utilization_pct,
+        "capacity_left":  round(100 - best.utilization_pct, 2),
     }
-
-# ================================
-# INPUT SCHEMA
-# ================================
-
-class InputData(BaseModel):
-
-    # 🔥 Demand Agent Inputs
-    forecast_qty: float
-    shortage_probability: float
-
-    # 🔥 Work centre state
-    utilization_pct: float
-    throughput_deviation_pct: float
-    efficiency: float
-    supplier_otif: float
-
-    # 🔥 Scheduling
-    queue_length: int
-    due_in_hrs: float
-
-    # 🔥 Supabase Work Centres
-    work_centres: List[Dict]
 
 # ================================
 # HEALTH CHECK
@@ -86,7 +97,7 @@ class InputData(BaseModel):
 
 @app.get("/")
 def home():
-    return {"message": "API is running 🚀"}
+    return {"status": "ok", "service": "Capacity & Schedule Control Tower API"}
 
 # ================================
 # PREDICT ENDPOINT
@@ -95,101 +106,79 @@ def home():
 @app.post("/predict")
 def predict(data: InputData):
 
-    # ----------------------------
-    # DEMAND → PROCESSING LOAD
-    # ----------------------------
-    processing_time_hrs = data.forecast_qty * 0.02
+    # ── DEMAND → LOAD ──────────────────────────────────────────
+    processing_time_hrs = round(data.forecast_qty * 0.02, 2)
 
-    # ----------------------------
-    # FEATURE VECTOR (ML INPUT)
-    # ----------------------------
+    # ── FEATURE VECTOR ─────────────────────────────────────────
     features = np.array([[
         data.utilization_pct,
         data.throughput_deviation_pct,
         data.efficiency,
         data.shortage_probability,
-        data.supplier_otif
+        data.supplier_otif,
     ]])
 
-    # ----------------------------
-    # MODEL PREDICTIONS
-    # ----------------------------
-    pred_class = clf.predict(features)
-    pred_delay = reg.predict(features)
+    # ── ML INFERENCE ───────────────────────────────────────────
+    alert_level     = label_encoder.inverse_transform(clf.predict(features))[0]
+    predicted_delay = round(float(reg.predict(features)[0]), 2)
 
-    alert_level = label_encoder.inverse_transform(pred_class)[0]
-    predicted_delay = float(pred_delay[0])
-
-    # ----------------------------
-    # CAPACITY
-    # ----------------------------
+    # ── CAPACITY ───────────────────────────────────────────────
     capacity_left = compute_capacity_left(data.utilization_pct)
 
-    # ----------------------------
-    # SCHEDULING
-    # ----------------------------
-    total_time, delay, schedule_risk = compute_schedule(
-        predicted_delay,
-        processing_time_hrs,
-        data.queue_length,
-        data.due_in_hrs
+    # ── SCHEDULE ───────────────────────────────────────────────
+    completion_hrs, expected_delay_hrs, schedule_risk = compute_schedule(
+        predicted_delay, processing_time_hrs, data.queue_length, data.due_in_hrs
     )
 
-    # ----------------------------
-    # BEST WORK CENTRE
-    # ----------------------------
+    # ── WORK CENTRE SELECTION ──────────────────────────────────
     best_wc = suggest_best_workcentre(data.work_centres)
 
-    # ----------------------------
-    # DECISION LOGIC
-    # ----------------------------
-    if best_wc and (schedule_risk == "HIGH" or alert_level == "RED"):
+    # ── DECISION ENGINE ────────────────────────────────────────
+    is_critical = alert_level == "RED" or schedule_risk == "HIGH"
+
+    if best_wc and is_critical:
         action = "SHIFT"
-        reason = f"Shift to {best_wc['id']} (utilization {best_wc['utilization']}%)"
+        reason = f"High risk detected — shift to {best_wc['id']} (utilization {best_wc['utilization_pct']}%)"
     elif alert_level == "RED":
         action = "OPTIMIZE_LOAD"
-        reason = "Reduce load on current work centre"
+        reason = "Capacity overloaded — reduce load on current work centre"
+    elif data.demand_gap is not None and data.demand_gap > 0:
+        action = "EXPEDITE"
+        reason = f"Demand gap of {data.demand_gap} units — expedite production"
     else:
         action = "MONITOR"
-        reason = "System stable"
+        reason = "System stable — continue monitoring"
 
-    # ----------------------------
-    # FINAL STATUS
-    # ----------------------------
-    status = "CRITICAL" if alert_level == "RED" or schedule_risk == "HIGH" else "NORMAL"
+    status = "CRITICAL" if is_critical else "NORMAL"
 
-    # ----------------------------
-    # RESPONSE
-    # ----------------------------
+    # ── RESPONSE ───────────────────────────────────────────────
+    # Flat structure — easy to extract in n8n Set node
     return {
-        "status": status,
+        # Top-level summary
+        "status":                   status,
+        "action":                   action,
+        "reason":                   reason,
 
-        "demand": {
-            "forecast_qty": data.forecast_qty,
-            "processing_time_hrs": round(processing_time_hrs, 2)
-        },
+        # Demand
+        "forecast_qty":             data.forecast_qty,
+        "demand_gap":               data.demand_gap,
+        "processing_time_hrs":      processing_time_hrs,
 
-        "capacity": {
-            "current_utilization": data.utilization_pct,
-            "capacity_left": capacity_left
-        },
+        # Capacity
+        "current_utilization_pct":  data.utilization_pct,
+        "capacity_left_pct":        capacity_left,
 
-        "prediction": {
-            "alert_level": alert_level,
-            "predicted_delay_hrs": round(predicted_delay, 2)
-        },
+        # ML Predictions
+        "alert_level":              alert_level,
+        "predicted_delay_hrs":      predicted_delay,
 
-        "schedule": {
-            "expected_completion_hrs": round(total_time, 2),
-            "expected_delay_hrs": round(max(0, delay), 2),
-            "risk": schedule_risk
-        },
+        # Schedule
+        "expected_completion_hrs":  completion_hrs,
+        "expected_delay_hrs":       expected_delay_hrs,
+        "schedule_risk":            schedule_risk,
 
-        "recommendation": {
-            "action": action,
-            "target_work_centre": best_wc["id"] if best_wc else None,
-            "target_utilization": best_wc["utilization"] if best_wc else None,
-            "target_capacity_left": best_wc["capacity_left"] if best_wc else None,
-            "reason": reason
-        }
+        # Work Centre Recommendation
+        "recommended_wc_id":        best_wc["id"] if best_wc else None,
+        "recommended_wc_utilization": best_wc["utilization_pct"] if best_wc else None,
+        "recommended_wc_capacity_left": best_wc["capacity_left"] if best_wc else None,
     }
