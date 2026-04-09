@@ -37,9 +37,13 @@ app.add_middleware(
 
 class WorkCentre(BaseModel):
     id: str
-    utilization_pct: float
+    utilization_pct: Optional[float] = None   # preferred name
+    utilization: Optional[float] = None        # Supabase column name fallback
     efficiency: Optional[float] = 1.0
     queue_length: Optional[int] = 0
+
+    def get_utilization(self) -> float:
+        return self.utilization_pct if self.utilization_pct is not None else (self.utilization or 0.0)
 
 class InputData(BaseModel):
     # From Demand Agent
@@ -84,11 +88,12 @@ def compute_schedule(predicted_delay: float, processing_time: float,
 def suggest_best_workcentre(work_centres: List[WorkCentre]):
     if not work_centres:
         return None
-    best = min(work_centres, key=lambda wc: wc.utilization_pct)
+    best = min(work_centres, key=lambda wc: wc.get_utilization())
+    util = best.get_utilization()
     return {
-        "id":             best.id,
-        "utilization_pct": best.utilization_pct,
-        "capacity_left":  round(100 - best.utilization_pct, 2),
+        "id":              best.id,
+        "utilization_pct": util,
+        "capacity_left":   round(100 - util, 2),
     }
 
 # ================================
@@ -110,12 +115,15 @@ def predict(data: InputData):
     processing_time_hrs = round(data.forecast_qty * 0.02, 2)
 
     # ── FEATURE VECTOR ─────────────────────────────────────────
+    # Normalize supplier_otif: accept both 0-1 and 0-100 scale
+    supplier_otif = data.supplier_otif / 100 if data.supplier_otif > 1 else data.supplier_otif
+
     features = np.array([[
         data.utilization_pct,
         data.throughput_deviation_pct,
         data.efficiency,
         data.shortage_probability,
-        data.supplier_otif,
+        supplier_otif,
     ]])
 
     # ── ML INFERENCE ───────────────────────────────────────────
