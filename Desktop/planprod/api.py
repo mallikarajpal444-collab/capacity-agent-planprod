@@ -1,5 +1,6 @@
 # ================================
-# CAPACITY + SCHEDULE + DEMAND INTEGRATED API (WITH ORDER TRACKING)
+# CAPACITY + SCHEDULE + DEMAND API
+# (NULL-SAFE ORDER TRACKING)
 # ================================
 
 from fastapi import FastAPI
@@ -14,8 +15,8 @@ import os
 # LOAD MODELS
 # ================================
 
-clf           = joblib.load(os.path.join(os.getcwd(), "capacity_classifier.joblib"))
-reg           = joblib.load(os.path.join(os.getcwd(), "delay_regressor.joblib"))
+clf = joblib.load(os.path.join(os.getcwd(), "capacity_classifier.joblib"))
+reg = joblib.load(os.path.join(os.getcwd(), "delay_regressor.joblib"))
 label_encoder = joblib.load(os.path.join(os.getcwd(), "label_encoder.joblib"))
 
 # ================================
@@ -45,8 +46,8 @@ class WorkCentre(BaseModel):
 
 
 class InputData(BaseModel):
-    # ✅ NEW: Production Order Tracking
-    production_order_no: str
+    # ✅ OPTIONAL NOW (NULL SAFE)
+    production_order_no: Optional[str] = None
 
     # Demand Agent
     forecast_qty: float
@@ -79,7 +80,7 @@ def compute_schedule(predicted_delay: float, processing_time: float,
                      queue_length: int, due_in_hrs: float):
 
     total_time = processing_time * (queue_length + 1) + predicted_delay
-    delay      = total_time - due_in_hrs
+    delay = total_time - due_in_hrs
 
     if delay > 2:
         risk = "HIGH"
@@ -116,7 +117,7 @@ def suggest_best_workcentre(work_centres: List[WorkCentre], current_wc_id: Optio
 
 @app.get("/")
 def home():
-    return {"status": "ok", "service": "Capacity & Schedule Control Tower API"}
+    return {"status": "ok", "service": "Capacity & Schedule API"}
 
 # ================================
 # PREDICT ENDPOINT
@@ -153,7 +154,7 @@ def predict(data: InputData):
     # ----------------------------
     # ML PREDICTION
     # ----------------------------
-    alert_level     = label_encoder.inverse_transform(clf.predict(features))[0]
+    alert_level = label_encoder.inverse_transform(clf.predict(features))[0]
     predicted_delay = round(float(reg.predict(features)[0]), 2)
 
     # ----------------------------
@@ -203,7 +204,8 @@ def predict(data: InputData):
     # RESPONSE
     # ----------------------------
     return {
-        "production_order_no": data.production_order_no,  # ✅ INCLUDED
+        # ✅ SAFE OUTPUT (handles null)
+        "production_order_no": data.production_order_no or "N/A",
 
         "status": status,
         "action": action,
