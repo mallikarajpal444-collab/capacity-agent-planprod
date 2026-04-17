@@ -1,5 +1,5 @@
 # ================================
-# CAPACITY + SCHEDULE + DEMAND INTEGRATED API (FIXED)
+# CAPACITY + SCHEDULE + DEMAND INTEGRATED API (ROBUST FINAL)
 # ================================
 
 from fastapi import FastAPI
@@ -39,8 +39,6 @@ class WorkCentre(BaseModel):
     id: str
     utilization_pct: Optional[float] = None
     utilization: Optional[float] = None
-    efficiency: Optional[float] = 1.0
-    queue_length: Optional[int] = 0
 
     def get_utilization(self) -> float:
         return self.utilization_pct if self.utilization_pct is not None else (self.utilization or 0.0)
@@ -52,8 +50,8 @@ class InputData(BaseModel):
     shortage_probability: float
     demand_gap: Optional[float] = None
 
-    # 🔥 NEW: current work centre
-    current_work_centre: str
+    # OPTIONAL (auto fallback if missing)
+    current_work_centre: Optional[str] = None
 
     # Current WC data
     utilization_pct: float
@@ -90,14 +88,13 @@ def compute_schedule(predicted_delay: float, processing_time: float,
     return round(total_time, 2), round(max(0.0, delay), 2), risk
 
 
-# 🔥 FIXED: exclude current WC
-def suggest_best_workcentre(work_centres: List[WorkCentre], current_wc_id: str):
+def suggest_best_workcentre(work_centres: List[WorkCentre], current_wc_id: Optional[str]):
 
     if not work_centres:
         return None
 
-    # Remove current WC
-    filtered = [wc for wc in work_centres if wc.id != current_wc_id]
+    # remove current WC if provided
+    filtered = [wc for wc in work_centres if wc.id != current_wc_id] if current_wc_id else work_centres
 
     if not filtered:
         return None
@@ -127,6 +124,13 @@ def home():
 def predict(data: InputData):
 
     # ----------------------------
+    # AUTO FIX: current WC fallback
+    # ----------------------------
+    current_wc = data.current_work_centre or (
+        data.work_centres[0].id if data.work_centres else None
+    )
+
+    # ----------------------------
     # DEMAND → PROCESSING TIME
     # ----------------------------
     processing_time_hrs = round(data.forecast_qty * 0.02, 2)
@@ -136,7 +140,7 @@ def predict(data: InputData):
     # ----------------------------
     supplier_otif = data.supplier_otif / 100 if data.supplier_otif > 1 else data.supplier_otif
 
-    features = np.array([[
+    features = np.array([[  
         data.utilization_pct,
         data.throughput_deviation_pct,
         data.efficiency,
@@ -168,7 +172,7 @@ def predict(data: InputData):
     # ----------------------------
     # WORK CENTRE SELECTION
     # ----------------------------
-    best_wc = suggest_best_workcentre(data.work_centres, data.current_work_centre)
+    best_wc = suggest_best_workcentre(data.work_centres, current_wc)
 
     # ----------------------------
     # DECISION ENGINE
@@ -177,23 +181,19 @@ def predict(data: InputData):
 
     if best_wc and is_critical:
         action = "SHIFT"
-        reason = f"High risk detected — shift to {best_wc['id']} (utilization {best_wc['utilization_pct']}%)"
+        reason = f"Shift to {best_wc['id']} (utilization {best_wc['utilization_pct']}%)"
 
     elif is_critical:
         action = "OPTIMIZE_LOAD"
-        reason = "High risk detected but no better alternative work centre available"
+        reason = "High risk but no better work centre available"
 
-    elif alert_level == "RED":
-        action = "OPTIMIZE_LOAD"
-        reason = "Capacity overloaded — reduce load on current work centre"
-
-    elif data.demand_gap is not None and data.demand_gap > 0:
+    elif data.demand_gap and data.demand_gap > 0:
         action = "EXPEDITE"
-        reason = f"Demand gap of {data.demand_gap} units — expedite production"
+        reason = f"Demand gap of {data.demand_gap} units"
 
     else:
         action = "MONITOR"
-        reason = "System stable — continue monitoring"
+        reason = "System stable"
 
     status = "CRITICAL" if is_critical else "NORMAL"
 
@@ -205,27 +205,32 @@ def predict(data: InputData):
         "action": action,
         "reason": reason,
 
-        # Demand
-        "forecast_qty": data.forecast_qty,
-        "demand_gap": data.demand_gap,
-        "processing_time_hrs": processing_time_hrs,
+        "demand": {
+            "forecast_qty": data.forecast_qty,
+            "processing_time_hrs": processing_time_hrs
+        },
 
-        # Capacity
-        "current_work_centre": data.current_work_centre,
-        "current_utilization_pct": data.utilization_pct,
-        "capacity_left_pct": capacity_left,
+        "capacity": {
+            "current_work_centre": current_wc,
+            "current_utilization": data.utilization_pct,
+            "capacity_left": capacity_left
+        },
 
-        # ML
-        "alert_level": alert_level,
-        "predicted_delay_hrs": predicted_delay,
+        "prediction": {
+            "alert_level": alert_level,
+            "predicted_delay_hrs": predicted_delay
+        },
 
-        # Schedule
-        "expected_completion_hrs": completion_hrs,
-        "expected_delay_hrs": expected_delay_hrs,
-        "schedule_risk": schedule_risk,
+        "schedule": {
+            "expected_completion_hrs": completion_hrs,
+            "expected_delay_hrs": expected_delay_hrs,
+            "risk": schedule_risk
+        },
 
-        # Recommendation
-        "recommended_wc_id": best_wc["id"] if best_wc else None,
-        "recommended_wc_utilization": best_wc["utilization_pct"] if best_wc else None,
-        "recommended_wc_capacity_left": best_wc["capacity_left"] if best_wc else None,
+        "recommendation": {
+            "target_work_centre": best_wc["id"] if best_wc else None,
+            "target_utilization": best_wc["utilization_pct"] if best_wc else None,
+            "target_capacity_left": best_wc["capacity_left"] if best_wc else None,
+            "reason": reason
+        }
     }
