@@ -1,5 +1,5 @@
 # ================================
-# CAPACITY + SCHEDULE + DEMAND INTEGRATED API (ROBUST FINAL)
+# CAPACITY + SCHEDULE + DEMAND INTEGRATED API (WITH ORDER TRACKING)
 # ================================
 
 from fastapi import FastAPI
@@ -45,12 +45,15 @@ class WorkCentre(BaseModel):
 
 
 class InputData(BaseModel):
+    # ✅ NEW: Production Order Tracking
+    production_order_no: str
+
     # Demand Agent
     forecast_qty: float
     shortage_probability: float
     demand_gap: Optional[float] = None
 
-    # OPTIONAL (auto fallback if missing)
+    # OPTIONAL
     current_work_centre: Optional[str] = None
 
     # Current WC data
@@ -93,7 +96,6 @@ def suggest_best_workcentre(work_centres: List[WorkCentre], current_wc_id: Optio
     if not work_centres:
         return None
 
-    # remove current WC if provided
     filtered = [wc for wc in work_centres if wc.id != current_wc_id] if current_wc_id else work_centres
 
     if not filtered:
@@ -124,7 +126,7 @@ def home():
 def predict(data: InputData):
 
     # ----------------------------
-    # AUTO FIX: current WC fallback
+    # CURRENT WC FALLBACK
     # ----------------------------
     current_wc = data.current_work_centre or (
         data.work_centres[0].id if data.work_centres else None
@@ -201,6 +203,8 @@ def predict(data: InputData):
     # RESPONSE
     # ----------------------------
     return {
+        "production_order_no": data.production_order_no,  # ✅ INCLUDED
+
         "status": status,
         "action": action,
         "reason": reason,
