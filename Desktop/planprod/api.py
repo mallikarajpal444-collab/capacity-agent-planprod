@@ -1,6 +1,5 @@
 # ================================
-# CAPACITY + SCHEDULE + DEMAND API
-# (NULL-SAFE ORDER TRACKING)
+# CAPACITY + SCHEDULE + DEMAND INTEGRATED API (ROBUST FINAL)
 # ================================
 
 from fastapi import FastAPI
@@ -15,8 +14,8 @@ import os
 # LOAD MODELS
 # ================================
 
-clf = joblib.load(os.path.join(os.getcwd(), "capacity_classifier.joblib"))
-reg = joblib.load(os.path.join(os.getcwd(), "delay_regressor.joblib"))
+clf           = joblib.load(os.path.join(os.getcwd(), "capacity_classifier.joblib"))
+reg           = joblib.load(os.path.join(os.getcwd(), "delay_regressor.joblib"))
 label_encoder = joblib.load(os.path.join(os.getcwd(), "label_encoder.joblib"))
 
 # ================================
@@ -46,7 +45,7 @@ class WorkCentre(BaseModel):
 
 
 class InputData(BaseModel):
-    # ✅ OPTIONAL NOW (NULL SAFE)
+    # ✅ ONLY ADDITION (OPTIONAL, NO LOGIC USE)
     production_order_no: Optional[str] = None
 
     # Demand Agent
@@ -54,7 +53,7 @@ class InputData(BaseModel):
     shortage_probability: float
     demand_gap: Optional[float] = None
 
-    # OPTIONAL
+    # OPTIONAL (auto fallback if missing)
     current_work_centre: Optional[str] = None
 
     # Current WC data
@@ -80,7 +79,7 @@ def compute_schedule(predicted_delay: float, processing_time: float,
                      queue_length: int, due_in_hrs: float):
 
     total_time = processing_time * (queue_length + 1) + predicted_delay
-    delay = total_time - due_in_hrs
+    delay      = total_time - due_in_hrs
 
     if delay > 2:
         risk = "HIGH"
@@ -117,7 +116,7 @@ def suggest_best_workcentre(work_centres: List[WorkCentre], current_wc_id: Optio
 
 @app.get("/")
 def home():
-    return {"status": "ok", "service": "Capacity & Schedule API"}
+    return {"status": "ok", "service": "Capacity & Schedule Control Tower API"}
 
 # ================================
 # PREDICT ENDPOINT
@@ -126,21 +125,12 @@ def home():
 @app.post("/predict")
 def predict(data: InputData):
 
-    # ----------------------------
-    # CURRENT WC FALLBACK
-    # ----------------------------
     current_wc = data.current_work_centre or (
         data.work_centres[0].id if data.work_centres else None
     )
 
-    # ----------------------------
-    # DEMAND → PROCESSING TIME
-    # ----------------------------
     processing_time_hrs = round(data.forecast_qty * 0.02, 2)
 
-    # ----------------------------
-    # FEATURE VECTOR
-    # ----------------------------
     supplier_otif = data.supplier_otif / 100 if data.supplier_otif > 1 else data.supplier_otif
 
     features = np.array([[  
@@ -151,20 +141,11 @@ def predict(data: InputData):
         supplier_otif,
     ]])
 
-    # ----------------------------
-    # ML PREDICTION
-    # ----------------------------
-    alert_level = label_encoder.inverse_transform(clf.predict(features))[0]
+    alert_level     = label_encoder.inverse_transform(clf.predict(features))[0]
     predicted_delay = round(float(reg.predict(features)[0]), 2)
 
-    # ----------------------------
-    # CAPACITY
-    # ----------------------------
     capacity_left = compute_capacity_left(data.utilization_pct)
 
-    # ----------------------------
-    # SCHEDULE
-    # ----------------------------
     completion_hrs, expected_delay_hrs, schedule_risk = compute_schedule(
         predicted_delay,
         processing_time_hrs,
@@ -172,14 +153,8 @@ def predict(data: InputData):
         data.due_in_hrs
     )
 
-    # ----------------------------
-    # WORK CENTRE SELECTION
-    # ----------------------------
     best_wc = suggest_best_workcentre(data.work_centres, current_wc)
 
-    # ----------------------------
-    # DECISION ENGINE
-    # ----------------------------
     is_critical = alert_level == "RED" or schedule_risk == "HIGH"
 
     if best_wc and is_critical:
@@ -200,12 +175,11 @@ def predict(data: InputData):
 
     status = "CRITICAL" if is_critical else "NORMAL"
 
-    # ----------------------------
-    # RESPONSE
-    # ----------------------------
+    # ================================
+    # RESPONSE (ONLY ADD FIELD)
+    # ================================
     return {
-        # ✅ SAFE OUTPUT (handles null)
-        "production_order_no": data.production_order_no or "N/A",
+        "production_order_no": data.production_order_no,  # ✅ JUST DISPLAYED
 
         "status": status,
         "action": action,
